@@ -6,74 +6,22 @@ import numpy as np
 import plotly.graph_objects as go
 from dash import ALL, Dash, Input, Output, State, dcc, html, no_update
 
+from app.compute import compute_indices
+from app.config import FHI_DEFAULT_WEIGHTS, SVI_DEFAULT_WEIGHTS
+from app.data_loader import load_rasters
 from app.popup_logic import suitability_hover_text
 
-# ---------------------------------------------------------------------------
-# Methodology defaults from interactive notebook (percent values)
-# ---------------------------------------------------------------------------
-FHI_DEFAULTS: dict[str, float] = {
-    "Elevation": 18.09,
-    "Slope": 18.29,
-    "TWI": 17.48,
-    "DistRiver": 14.23,
-    "Rainfall": 12.73,
-    "LULC": 11.95,
-    "SoilTexture": 7.24,
-}
-
-SVI_DEFAULTS: dict[str, float] = {
-    "DistRoad": 25.0,
-    "DistHealth": 25.0,
-    "PopDensity": 25.0,
-    "ConflictIndex": 25.0,
-}
-
-# ---------------------------------------------------------------------------
-# Demo data grids (replace with raster data in production)
-# ---------------------------------------------------------------------------
-np.random.seed(7)
-GRID_SHAPE = (25, 25)
-
-
-def make_demo_layers(names: list[str], seed_start: int) -> dict[str, np.ndarray]:
-    """Create deterministic 1..5 demo layers per factor."""
-
-    out: dict[str, np.ndarray] = {}
-    for i, name in enumerate(names):
-        rng = np.random.default_rng(seed_start + i)
-        out[name] = rng.integers(1, 6, size=GRID_SHAPE).astype(np.float32)
-    return out
-
-
-FHI_LAYERS = make_demo_layers(list(FHI_DEFAULTS.keys()), seed_start=100)
-SVI_LAYERS = make_demo_layers(list(SVI_DEFAULTS.keys()), seed_start=200)
-
-
-# ---------------------------------------------------------------------------
-# Computation helpers
-# ---------------------------------------------------------------------------
-def weighted_index(layers: dict[str, np.ndarray], weights_pct: dict[str, float]) -> np.ndarray:
-    """Compute weighted index where weights are percentages summing to 100."""
-
-    return sum((weights_pct[name] / 100.0) * layer for name, layer in layers.items())
+RASTER_BUNDLE = load_rasters()
+FHI_LAYERS = RASTER_BUNDLE.fhi_layers
+SVI_LAYERS = RASTER_BUNDLE.svi_layers
 
 
 def compute_maps(fhi_weights_pct: dict[str, float], svi_weights_pct: dict[str, float]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Compute FHI, SVI and suitability maps.
+    """Compute FHI, SVI and suitability maps from loaded rasters."""
 
-    Suitability uses notebook inversion logic:
-    SI = 0.6 * (6 - FHI) + 0.4 * (6 - SVI)
-    """
-
-    fhi = weighted_index(FHI_LAYERS, fhi_weights_pct)
-    svi = weighted_index(SVI_LAYERS, svi_weights_pct)
-    suitability = (0.6 * (6.0 - fhi)) + (0.4 * (6.0 - svi))
-    return fhi, svi, suitability
+    return compute_indices(FHI_LAYERS, SVI_LAYERS, fhi_weights_pct, svi_weights_pct)
 
 
-# ---------------------------------------------------------------------------
-# Plotting helpers
-# ---------------------------------------------------------------------------
 def heatmap_figure(z: np.ndarray, title: str, colorbar_title: str, with_hover: bool = False, fhi: np.ndarray | None = None, svi: np.ndarray | None = None) -> go.Figure:
     """Build a heatmap figure."""
 
@@ -117,21 +65,25 @@ def total_ok(total: float) -> bool:
     return abs(total - 100.0) <= 0.05
 
 
-initial_fhi, initial_svi, initial_si = compute_maps(FHI_DEFAULTS, SVI_DEFAULTS)
+initial_fhi, initial_svi, initial_si = compute_maps(FHI_DEFAULT_WEIGHTS, SVI_DEFAULT_WEIGHTS)
 
 app = Dash(__name__)
 app.title = "Jonglei Suitability"
+
+warnings_text = [html.Li(message) for message in RASTER_BUNDLE.warnings]
 
 app.layout = html.Div(
     [
         html.H2("UNMISS Jonglei Suitability Explorer"),
         html.P("Adjust FHI and SVI factor weights. Maps update only when each group totals exactly 100% and you press Update Maps."),
+        html.P(f"Raster source: {RASTER_BUNDLE.raster_dir}"),
+        html.Ul(warnings_text, style={"color": "#b45309"}) if warnings_text else html.Div(),
         html.Div(
             [
                 html.Div(
                     [
                         html.H3("FHI factor weights (%)"),
-                        *[make_slider("fhi", k, v) for k, v in FHI_DEFAULTS.items()],
+                        *[make_slider("fhi", k, v) for k, v in FHI_DEFAULT_WEIGHTS.items()],
                         html.Div(id="fhi-total", style={"fontWeight": "700"}),
                     ],
                     style={"padding": "0.75rem", "border": "1px solid #ddd", "borderRadius": "8px"},
@@ -139,7 +91,7 @@ app.layout = html.Div(
                 html.Div(
                     [
                         html.H3("SVI factor weights (%)"),
-                        *[make_slider("svi", k, v) for k, v in SVI_DEFAULTS.items()],
+                        *[make_slider("svi", k, v) for k, v in SVI_DEFAULT_WEIGHTS.items()],
                         html.Div(id="svi-total", style={"fontWeight": "700"}),
                     ],
                     style={"padding": "0.75rem", "border": "1px solid #ddd", "borderRadius": "8px"},
@@ -160,8 +112,6 @@ app.layout = html.Div(
     ],
     style={"maxWidth": "1200px", "margin": "0 auto", "padding": "1rem"},
 )
-
-
 
 
 @app.callback(
@@ -205,8 +155,8 @@ def update_maps(n_clicks: int, fhi_vals: list[float], svi_vals: list[float]):
             style={"color": "crimson", "fontWeight": "700"},
         )
 
-    fhi_weights = dict(zip(FHI_DEFAULTS.keys(), fhi_vals))
-    svi_weights = dict(zip(SVI_DEFAULTS.keys(), svi_vals))
+    fhi_weights = dict(zip(FHI_DEFAULT_WEIGHTS.keys(), fhi_vals))
+    svi_weights = dict(zip(SVI_DEFAULT_WEIGHTS.keys(), svi_vals))
     fhi, svi, si = compute_maps(fhi_weights, svi_weights)
 
     return (

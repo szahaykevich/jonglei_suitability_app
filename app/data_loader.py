@@ -8,12 +8,8 @@ from pathlib import Path
 import numpy as np
 import rasterio
 
-try:
-    from .config import DISPLAY_SCALE, PLACEHOLDER_SHAPE, factor_paths, get_raster_dir
-    from .raster_utils import is_lfs_pointer, placeholder_layer, read_reclass_layer
-except ImportError:  # script execution fallback
-    from config import DISPLAY_SCALE, PLACEHOLDER_SHAPE, factor_paths, get_raster_dir
-    from raster_utils import is_lfs_pointer, placeholder_layer, read_reclass_layer
+from app.config import DISPLAY_SCALE, PLACEHOLDER_SHAPE, factor_paths, get_raster_dir
+from app.raster_utils import is_lfs_pointer, placeholder_layer, read_reclass_layer
 
 
 @dataclass
