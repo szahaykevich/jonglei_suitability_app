@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-try:
-    from .config import FHI_DEFAULT_WEIGHTS, SVI_DEFAULT_WEIGHTS
-except ImportError:  # script execution fallback
-    from config import FHI_DEFAULT_WEIGHTS, SVI_DEFAULT_WEIGHTS
+from app.config import FHI_DEFAULT_WEIGHTS, SVI_DEFAULT_WEIGHTS
 
 
 @dataclass(frozen=True)
