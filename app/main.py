@@ -144,6 +144,31 @@ def total_ok(total: float) -> bool:
     return abs(total - 100.0) <= 0.05
 
 
+def _current_weight_map(
+    names: list[str],
+    slider_ids: list[dict[str, str]],
+    slider_vals: list[float],
+    input_ids: list[dict[str, str]],
+    input_vals: list[float],
+) -> dict[str, float]:
+    """Resolve the current UI weights keyed by factor name at button-click time."""
+
+    slider_by_name = {component_id["name"]: float(value) for component_id, value in zip(slider_ids, slider_vals)}
+    input_by_name = {
+        component_id["name"]: float(value)
+        for component_id, value in zip(input_ids, input_vals)
+        if value is not None
+    }
+
+    resolved: dict[str, float] = {}
+    for name in names:
+        if name in input_by_name:
+            resolved[name] = input_by_name[name]
+        else:
+            resolved[name] = slider_by_name[name]
+    return resolved
+
+
 initial_fhi, initial_svi, initial_si = compute_maps(FHI_DEFAULT_WEIGHTS, SVI_DEFAULT_WEIGHTS)
 
 app = Dash(__name__)
@@ -241,14 +266,45 @@ def refresh_weight_labels(fhi_vals: list[float], svi_vals: list[float]):
     Output("svi-plot", "figure"),
     Output("status-msg", "children"),
     Input("update-btn", "n_clicks"),
+    State({"type": "weight-slider", "family": "fhi", "name": ALL}, "id"),
     State({"type": "weight-slider", "family": "fhi", "name": ALL}, "value"),
+    State({"type": "weight-input", "family": "fhi", "name": ALL}, "id"),
+    State({"type": "weight-input", "family": "fhi", "name": ALL}, "value"),
+    State({"type": "weight-slider", "family": "svi", "name": ALL}, "id"),
     State({"type": "weight-slider", "family": "svi", "name": ALL}, "value"),
+    State({"type": "weight-input", "family": "svi", "name": ALL}, "id"),
+    State({"type": "weight-input", "family": "svi", "name": ALL}, "value"),
     prevent_initial_call=True,
 )
-def update_maps(n_clicks: int, fhi_vals: list[float], svi_vals: list[float]):
+def update_maps(
+    n_clicks: int,
+    fhi_slider_ids: list[dict[str, str]],
+    fhi_slider_vals: list[float],
+    fhi_input_ids: list[dict[str, str]],
+    fhi_input_vals: list[float],
+    svi_slider_ids: list[dict[str, str]],
+    svi_slider_vals: list[float],
+    svi_input_ids: list[dict[str, str]],
+    svi_input_vals: list[float],
+):
     del n_clicks
-    fhi_total = pct_total(fhi_vals)
-    svi_total = pct_total(svi_vals)
+    fhi_weights = _current_weight_map(
+        list(FHI_DEFAULT_WEIGHTS.keys()),
+        fhi_slider_ids,
+        fhi_slider_vals,
+        fhi_input_ids,
+        fhi_input_vals,
+    )
+    svi_weights = _current_weight_map(
+        list(SVI_DEFAULT_WEIGHTS.keys()),
+        svi_slider_ids,
+        svi_slider_vals,
+        svi_input_ids,
+        svi_input_vals,
+    )
+
+    fhi_total = pct_total(list(fhi_weights.values()))
+    svi_total = pct_total(list(svi_weights.values()))
 
     if not total_ok(fhi_total) or not total_ok(svi_total):
         return no_update, no_update, no_update, html.Span(
@@ -256,8 +312,6 @@ def update_maps(n_clicks: int, fhi_vals: list[float], svi_vals: list[float]):
             style={"color": "crimson", "fontWeight": "700"},
         )
 
-    fhi_weights = dict(zip(FHI_DEFAULT_WEIGHTS.keys(), fhi_vals))
-    svi_weights = dict(zip(SVI_DEFAULT_WEIGHTS.keys(), svi_vals))
     fhi, svi, si = compute_maps(fhi_weights, svi_weights)
 
     return (
