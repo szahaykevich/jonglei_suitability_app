@@ -45,5 +45,6 @@ jonglei-suitability-app/
 
 ## Notes
 
-- The current `app/main.py` uses demo grids so you can test slider behavior and hover values quickly.
-- Replace demo arrays with your processed rasters (`fhi.tif`, `svi.tif`, and final suitability output) as your next step.
+- `app/main.py` now loads configured reclassified rasters from `data/processed/` by default.
+- If local TIFFs are unavailable (or Git LFS pointers are present), the app gracefully falls back to placeholders and shows a warning banner.
+- To point at a different raster folder, set `JONGLEI_RASTER_DIR` before launching the app.
