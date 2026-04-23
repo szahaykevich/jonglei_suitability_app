@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import plotly.graph_objects as go
-from dash import ALL, Dash, Input, Output, State, dcc, html, no_update
+from dash import ALL, Dash, Input, Output, State, callback_context, dcc, html, no_update
 
 from app.compute import compute_indices
 from app.config import FHI_DEFAULT_WEIGHTS, SVI_DEFAULT_WEIGHTS
@@ -41,20 +41,99 @@ def heatmap_figure(z: np.ndarray, title: str, colorbar_title: str, with_hover: b
 
     fig = go.Figure(data=trace)
     fig.update_layout(title=title, margin={"l": 10, "r": 10, "t": 40, "b": 10})
+    fig.update_yaxes(autorange="reversed")
     return fig
 
 
 def make_slider(family: str, name: str, value: float) -> html.Div:
-    """Create a slider block with a visible percent label."""
+    """Create a synchronized slider + numeric input block with a visible percent label."""
 
     slider_id = {"type": "weight-slider", "family": family, "name": name}
+    input_id = {"type": "weight-input", "family": family, "name": name}
     return html.Div(
         [
             html.Div([html.Span(name), html.Span(f"{value:.2f}%", id={"type": "weight-label", "family": family, "name": name}, style={"fontWeight": "600"})], style={"display": "flex", "justifyContent": "space-between"}),
-            dcc.Slider(id=slider_id, min=0, max=100, step=0.01, value=value, tooltip={"always_visible": False, "placement": "bottom"}),
+            html.Div(
+                [
+                    html.Div(
+                        dcc.Slider(id=slider_id, min=0, max=100, step=0.01, value=value, tooltip={"always_visible": False, "placement": "bottom"}),
+                        style={"flex": "1"},
+                    ),
+                    dcc.Input(
+                        id=input_id,
+                        type="number",
+                        min=0,
+                        max=100,
+                        step=0.01,
+                        value=value,
+                        debounce=True,
+                        style={"width": "92px"},
+                    ),
+                ],
+                style={"display": "flex", "gap": "0.5rem", "alignItems": "center"},
+            ),
         ],
         style={"marginBottom": "0.6rem"},
     )
+
+
+def _normalize_to_100(values: list[float]) -> list[float]:
+    rounded = [round(v, 2) for v in values]
+    drift = round(100.0 - sum(rounded), 2)
+    if rounded:
+        rounded[-1] = round(rounded[-1] + drift, 2)
+    return rounded
+
+
+def _rescale_group(values: list[float], changed_index: int, raw_new_value: float | None) -> list[float]:
+    out = [float(v) if v is not None else 0.0 for v in values]
+    if not out:
+        return out
+
+    new_value = 0.0 if raw_new_value is None else float(raw_new_value)
+    new_value = min(100.0, max(0.0, new_value))
+    out[changed_index] = new_value
+
+    if len(out) == 1:
+        return [100.0]
+
+    remaining = max(0.0, 100.0 - new_value)
+    other_indices = [idx for idx in range(len(out)) if idx != changed_index]
+    other_total = sum(out[idx] for idx in other_indices)
+
+    if other_total <= 0:
+        share = remaining / float(len(other_indices))
+        for idx in other_indices:
+            out[idx] = share
+    else:
+        scale = remaining / other_total
+        for idx in other_indices:
+            out[idx] = out[idx] * scale
+
+    return _normalize_to_100(out)
+
+
+def _update_group_from_trigger(
+    family: str,
+    names: list[str],
+    slider_vals: list[float],
+    input_vals: list[float],
+) -> tuple[list[float], list[float]]:
+    values = [float(v) if v is not None else 0.0 for v in slider_vals]
+    triggered = callback_context.triggered_id
+
+    if not isinstance(triggered, dict) or triggered.get("family") != family:
+        return values, values
+
+    name = triggered.get("name")
+    if name not in names:
+        return values, values
+
+    index = names.index(name)
+    source = triggered.get("type")
+    candidate = input_vals[index] if source == "weight-input" else slider_vals[index]
+    rescaled = _rescale_group(values, index, candidate)
+    return rescaled, rescaled
 
 
 def pct_total(values: list[float]) -> float:
@@ -112,6 +191,28 @@ app.layout = html.Div(
     ],
     style={"maxWidth": "1200px", "margin": "0 auto", "padding": "1rem"},
 )
+
+
+@app.callback(
+    Output({"type": "weight-slider", "family": "fhi", "name": ALL}, "value"),
+    Output({"type": "weight-input", "family": "fhi", "name": ALL}, "value"),
+    Input({"type": "weight-slider", "family": "fhi", "name": ALL}, "value"),
+    Input({"type": "weight-input", "family": "fhi", "name": ALL}, "value"),
+)
+def sync_fhi_weights(fhi_slider_vals: list[float], fhi_input_vals: list[float]):
+    names = list(FHI_DEFAULT_WEIGHTS.keys())
+    return _update_group_from_trigger("fhi", names, fhi_slider_vals, fhi_input_vals)
+
+
+@app.callback(
+    Output({"type": "weight-slider", "family": "svi", "name": ALL}, "value"),
+    Output({"type": "weight-input", "family": "svi", "name": ALL}, "value"),
+    Input({"type": "weight-slider", "family": "svi", "name": ALL}, "value"),
+    Input({"type": "weight-input", "family": "svi", "name": ALL}, "value"),
+)
+def sync_svi_weights(svi_slider_vals: list[float], svi_input_vals: list[float]):
+    names = list(SVI_DEFAULT_WEIGHTS.keys())
+    return _update_group_from_trigger("svi", names, svi_slider_vals, svi_input_vals)
 
 
 @app.callback(
