@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import plotly.graph_objects as go
-from dash import ALL, Dash, Input, Output, State, callback_context, dcc, html, no_update
+from dash import ALL, Dash, Input, Output, State, ctx, dcc, html, no_update
 
 from app.compute import compute_indices
 from app.config import FHI_DEFAULT_WEIGHTS, SVI_DEFAULT_WEIGHTS
@@ -88,6 +88,10 @@ def pct_total(values: list[float]) -> float:
     return float(sum(values))
 
 
+def _coerce_values(values: list[float]) -> list[float]:
+    return [max(0.0, min(100.0, float(v or 0.0))) for v in values]
+
+
 def _rounded_to_100(values: list[float]) -> list[float]:
     rounded = [round(float(v), 2) for v in values]
     if not rounded:
@@ -103,7 +107,7 @@ def normalize_weights(values: list[float], changed_idx: int | None) -> list[floa
     if not values:
         return []
 
-    clean = [max(0.0, min(100.0, float(v or 0.0))) for v in values]
+    clean = _coerce_values(values)
 
     if changed_idx is None or len(clean) == 1:
         total = sum(clean)
@@ -201,10 +205,9 @@ def sync_and_normalize_weights(
     fhi_input_vals: list[float],
     svi_input_vals: list[float],
 ):
-    trigger = callback_context.triggered_id
-
-    norm_fhi = normalize_weights(fhi_slider_vals, None)
-    norm_svi = normalize_weights(svi_slider_vals, None)
+    trigger = ctx.triggered_id
+    norm_fhi = _coerce_values(fhi_slider_vals)
+    norm_svi = _coerce_values(svi_slider_vals)
 
     if isinstance(trigger, dict):
         name = trigger.get("name")
@@ -219,6 +222,9 @@ def sync_and_normalize_weights(
             source = svi_input_vals if control_type == "weight-input" else svi_slider_vals
             idx = SVI_NAMES.index(name)
             norm_svi = normalize_weights(source, idx)
+    else:
+        norm_fhi = normalize_weights(norm_fhi, None)
+        norm_svi = normalize_weights(norm_svi, None)
 
     fhi_labels = [f"{v:.2f}%" for v in norm_fhi]
     svi_labels = [f"{v:.2f}%" for v in norm_svi]
