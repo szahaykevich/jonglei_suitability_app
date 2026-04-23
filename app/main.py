@@ -2,44 +2,122 @@
 
 from __future__ import annotations
 
-from dash import Dash, Input, Output, dcc, html
+import numpy as np
+import plotly.graph_objects as go
+from dash import ALL, Dash, Input, Output, State, dcc, html, no_update
 
-try:
-    from .compute import compute_indices
-    from .config import FHI_DEFAULT_WEIGHTS, SVI_DEFAULT_WEIGHTS
-    from .data_loader import load_rasters
-    from .plotting import build_suitability_figure, extract_point_summary
-except ImportError:  # script execution fallback
-    from compute import compute_indices
-    from config import FHI_DEFAULT_WEIGHTS, SVI_DEFAULT_WEIGHTS
-    from data_loader import load_rasters
-    from plotting import build_suitability_figure, extract_point_summary
+from app.popup_logic import suitability_hover_text
 
-RASTERS = load_rasters()
+# ---------------------------------------------------------------------------
+# Methodology defaults from interactive notebook (percent values)
+# ---------------------------------------------------------------------------
+FHI_DEFAULTS: dict[str, float] = {
+    "Elevation": 18.09,
+    "Slope": 18.29,
+    "TWI": 17.48,
+    "DistRiver": 14.23,
+    "Rainfall": 12.73,
+    "LULC": 11.95,
+    "SoilTexture": 7.24,
+}
+
+SVI_DEFAULTS: dict[str, float] = {
+    "DistRoad": 25.0,
+    "DistHealth": 25.0,
+    "PopDensity": 25.0,
+    "ConflictIndex": 25.0,
+}
+
+# ---------------------------------------------------------------------------
+# Demo data grids (replace with raster data in production)
+# ---------------------------------------------------------------------------
+np.random.seed(7)
+GRID_SHAPE = (25, 25)
 
 
-def weight_slider(slider_id: str, label: str, value: float) -> html.Div:
+def make_demo_layers(names: list[str], seed_start: int) -> dict[str, np.ndarray]:
+    """Create deterministic 1..5 demo layers per factor."""
+
+    out: dict[str, np.ndarray] = {}
+    for i, name in enumerate(names):
+        rng = np.random.default_rng(seed_start + i)
+        out[name] = rng.integers(1, 6, size=GRID_SHAPE).astype(np.float32)
+    return out
+
+
+FHI_LAYERS = make_demo_layers(list(FHI_DEFAULTS.keys()), seed_start=100)
+SVI_LAYERS = make_demo_layers(list(SVI_DEFAULTS.keys()), seed_start=200)
+
+
+# ---------------------------------------------------------------------------
+# Computation helpers
+# ---------------------------------------------------------------------------
+def weighted_index(layers: dict[str, np.ndarray], weights_pct: dict[str, float]) -> np.ndarray:
+    """Compute weighted index where weights are percentages summing to 100."""
+
+    return sum((weights_pct[name] / 100.0) * layer for name, layer in layers.items())
+
+
+def compute_maps(fhi_weights_pct: dict[str, float], svi_weights_pct: dict[str, float]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compute FHI, SVI and suitability maps.
+
+    Suitability uses notebook inversion logic:
+    SI = 0.6 * (6 - FHI) + 0.4 * (6 - SVI)
+    """
+
+    fhi = weighted_index(FHI_LAYERS, fhi_weights_pct)
+    svi = weighted_index(SVI_LAYERS, svi_weights_pct)
+    suitability = (0.6 * (6.0 - fhi)) + (0.4 * (6.0 - svi))
+    return fhi, svi, suitability
+
+
+# ---------------------------------------------------------------------------
+# Plotting helpers
+# ---------------------------------------------------------------------------
+def heatmap_figure(z: np.ndarray, title: str, colorbar_title: str, with_hover: bool = False, fhi: np.ndarray | None = None, svi: np.ndarray | None = None) -> go.Figure:
+    """Build a heatmap figure."""
+
+    if with_hover and fhi is not None and svi is not None:
+        hover = np.empty(z.shape, dtype=object)
+        for row in range(z.shape[0]):
+            for col in range(z.shape[1]):
+                hover[row, col] = suitability_hover_text(
+                    county_name=f"Cell {row},{col}",
+                    suitability_value=float(z[row, col]),
+                    fhi_score=float(fhi[row, col]),
+                    svi_score=float(svi[row, col]),
+                )
+        trace = go.Heatmap(z=z, text=hover, hoverinfo="text", colorscale="Viridis", colorbar={"title": colorbar_title})
+    else:
+        trace = go.Heatmap(z=z, colorscale="YlOrRd", hoverinfo="skip", colorbar={"title": colorbar_title})
+
+    fig = go.Figure(data=trace)
+    fig.update_layout(title=title, margin={"l": 10, "r": 10, "t": 40, "b": 10})
+    return fig
+
+
+def make_slider(family: str, name: str, value: float) -> html.Div:
+    """Create a slider block with a visible percent label."""
+
+    slider_id = {"type": "weight-slider", "family": family, "name": name}
     return html.Div(
         [
-            html.Label(f"{label} ({value:.2f}%)", id=f"{slider_id}-label"),
-            dcc.Slider(
-                id=slider_id,
-                min=1,
-                max=60,
-                step=0.01,
-                value=value,
-                tooltip={"placement": "bottom", "always_visible": False},
-            ),
+            html.Div([html.Span(name), html.Span(f"{value:.2f}%", id={"type": "weight-label", "family": family, "name": name}, style={"fontWeight": "600"})], style={"display": "flex", "justifyContent": "space-between"}),
+            dcc.Slider(id=slider_id, min=0, max=100, step=0.01, value=value, tooltip={"always_visible": False, "placement": "bottom"}),
         ],
-        style={"marginBottom": "0.65rem"},
+        style={"marginBottom": "0.6rem"},
     )
 
 
-def compute_figure(fhi_weights: dict[str, float], svi_weights: dict[str, float]):
-    fhi, svi, suitability = compute_indices(RASTERS.fhi_layers, RASTERS.svi_layers, fhi_weights, svi_weights)
-    fig = build_suitability_figure(suitability, fhi, svi)
-    return fig
+def pct_total(values: list[float]) -> float:
+    return float(sum(values))
 
+
+def total_ok(total: float) -> bool:
+    return abs(total - 100.0) <= 0.05
+
+
+initial_fhi, initial_svi, initial_si = compute_maps(FHI_DEFAULTS, SVI_DEFAULTS)
 
 app = Dash(__name__)
 app.title = "Jonglei Suitability"
@@ -47,91 +125,96 @@ app.title = "Jonglei Suitability"
 app.layout = html.Div(
     [
         html.H2("UNMISS Jonglei Suitability Explorer"),
-        html.Div(
-            [
-                html.Strong("Raster directory"),
-                html.Div(str(RASTERS.raster_dir)),
-                html.Div(
-                    RASTERS.warnings[0] if RASTERS.warnings else "All configured rasters loaded.",
-                    style={"color": "#b45309" if RASTERS.warnings else "#065f46", "marginTop": "0.25rem"},
-                    id="raster-status",
-                ),
-            ],
-            style={"padding": "0.75rem", "border": "1px solid #ddd", "marginBottom": "1rem"},
-        ),
+        html.P("Adjust FHI and SVI factor weights. Maps update only when each group totals exactly 100% and you press Update Maps."),
         html.Div(
             [
                 html.Div(
                     [
-                        html.H4("FHI weights"),
-                        *[
-                            weight_slider(f"fhi-{name}", name, value)
-                            for name, value in FHI_DEFAULT_WEIGHTS.items()
-                        ],
+                        html.H3("FHI factor weights (%)"),
+                        *[make_slider("fhi", k, v) for k, v in FHI_DEFAULTS.items()],
+                        html.Div(id="fhi-total", style={"fontWeight": "700"}),
                     ],
-                    style={"flex": "1", "minWidth": "320px"},
+                    style={"padding": "0.75rem", "border": "1px solid #ddd", "borderRadius": "8px"},
                 ),
                 html.Div(
                     [
-                        html.H4("SVI weights"),
-                        *[
-                            weight_slider(f"svi-{name}", name, value)
-                            for name, value in SVI_DEFAULT_WEIGHTS.items()
-                        ],
+                        html.H3("SVI factor weights (%)"),
+                        *[make_slider("svi", k, v) for k, v in SVI_DEFAULTS.items()],
+                        html.Div(id="svi-total", style={"fontWeight": "700"}),
                     ],
-                    style={"flex": "1", "minWidth": "320px"},
+                    style={"padding": "0.75rem", "border": "1px solid #ddd", "borderRadius": "8px"},
                 ),
             ],
-            style={"display": "flex", "gap": "1rem", "flexWrap": "wrap"},
+            style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "1rem"},
         ),
-        dcc.Graph(id="suitability-map", figure=compute_figure(FHI_DEFAULT_WEIGHTS, SVI_DEFAULT_WEIGHTS)),
+        html.Button("Update Maps", id="update-btn", n_clicks=0, style={"marginTop": "1rem", "padding": "0.5rem 1rem", "fontWeight": "700"}),
+        html.Div(id="status-msg", style={"marginTop": "0.5rem"}),
+        dcc.Graph(id="suitability-plot", figure=heatmap_figure(initial_si, "Suitability Index (Interactive)", "Suitability", with_hover=True, fhi=initial_fhi, svi=initial_svi)),
         html.Div(
             [
-                html.H4("Hover details"),
-                html.Div(
-                    "Hover: hover or click a cell to view Suitability, FHI, and SVI.",
-                    id="hover-details",
-                    style={"fontFamily": "monospace"},
-                ),
-                html.H4("Click details", style={"marginTop": "0.75rem"}),
-                html.Div(
-                    "Click: hover or click a cell to view Suitability, FHI, and SVI.",
-                    id="click-details",
-                    style={"fontFamily": "monospace"},
-                ),
+                dcc.Graph(id="fhi-plot", figure=heatmap_figure(initial_fhi, "Flood Hazard Index (Static)", "FHI"), config={"staticPlot": True}),
+                dcc.Graph(id="svi-plot", figure=heatmap_figure(initial_svi, "Social Vulnerability Index (Static)", "SVI"), config={"staticPlot": True}),
             ],
-            style={"padding": "0.75rem", "border": "1px solid #ddd", "marginTop": "0.75rem"},
+            style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "1rem"},
         ),
     ],
     style={"maxWidth": "1200px", "margin": "0 auto", "padding": "1rem"},
 )
 
 
+
+
 @app.callback(
-    Output("suitability-map", "figure"),
-    Output("hover-details", "children"),
-    Output("click-details", "children"),
-    *([Input(f"fhi-{name}", "value") for name in FHI_DEFAULT_WEIGHTS]),
-    *([Input(f"svi-{name}", "value") for name in SVI_DEFAULT_WEIGHTS]),
-    Input("suitability-map", "hoverData"),
-    Input("suitability-map", "clickData"),
+    Output({"type": "weight-label", "family": "fhi", "name": ALL}, "children"),
+    Output({"type": "weight-label", "family": "svi", "name": ALL}, "children"),
+    Output("fhi-total", "children"),
+    Output("svi-total", "children"),
+    Input({"type": "weight-slider", "family": "fhi", "name": ALL}, "value"),
+    Input({"type": "weight-slider", "family": "svi", "name": ALL}, "value"),
 )
-def refresh_map(*args):
-    fhi_count = len(FHI_DEFAULT_WEIGHTS)
-    svi_count = len(SVI_DEFAULT_WEIGHTS)
+def refresh_weight_labels(fhi_vals: list[float], svi_vals: list[float]):
+    fhi_labels = [f"{v:.2f}%" for v in fhi_vals]
+    svi_labels = [f"{v:.2f}%" for v in svi_vals]
 
-    fhi_vals = args[:fhi_count]
-    svi_vals = args[fhi_count : fhi_count + svi_count]
-    hover_data = args[-2]
-    click_data = args[-1]
+    fhi_total = pct_total(fhi_vals)
+    svi_total = pct_total(svi_vals)
 
-    fhi_weights = {name: float(val) for name, val in zip(FHI_DEFAULT_WEIGHTS, fhi_vals)}
-    svi_weights = {name: float(val) for name, val in zip(SVI_DEFAULT_WEIGHTS, svi_vals)}
+    fhi_text = f"FHI total: {fhi_total:.2f}% {'✅' if total_ok(fhi_total) else '❌'}"
+    svi_text = f"SVI total: {svi_total:.2f}% {'✅' if total_ok(svi_total) else '❌'}"
+    return fhi_labels, svi_labels, fhi_text, svi_text
 
-    fig = compute_figure(fhi_weights, svi_weights)
-    hover_summary = extract_point_summary(hover_data, "Hover")
-    click_summary = extract_point_summary(click_data, "Click")
-    return fig, hover_summary, click_summary
+
+@app.callback(
+    Output("suitability-plot", "figure"),
+    Output("fhi-plot", "figure"),
+    Output("svi-plot", "figure"),
+    Output("status-msg", "children"),
+    Input("update-btn", "n_clicks"),
+    State({"type": "weight-slider", "family": "fhi", "name": ALL}, "value"),
+    State({"type": "weight-slider", "family": "svi", "name": ALL}, "value"),
+    prevent_initial_call=True,
+)
+def update_maps(n_clicks: int, fhi_vals: list[float], svi_vals: list[float]):
+    del n_clicks
+    fhi_total = pct_total(fhi_vals)
+    svi_total = pct_total(svi_vals)
+
+    if not total_ok(fhi_total) or not total_ok(svi_total):
+        return no_update, no_update, no_update, html.Span(
+            f"Cannot update maps yet. FHI total = {fhi_total:.2f}% and SVI total = {svi_total:.2f}%. Both must equal 100.00%.",
+            style={"color": "crimson", "fontWeight": "700"},
+        )
+
+    fhi_weights = dict(zip(FHI_DEFAULTS.keys(), fhi_vals))
+    svi_weights = dict(zip(SVI_DEFAULTS.keys(), svi_vals))
+    fhi, svi, si = compute_maps(fhi_weights, svi_weights)
+
+    return (
+        heatmap_figure(si, "Suitability Index (Interactive)", "Suitability", with_hover=True, fhi=fhi, svi=svi),
+        heatmap_figure(fhi, "Flood Hazard Index (Static)", "FHI"),
+        heatmap_figure(svi, "Social Vulnerability Index (Static)", "SVI"),
+        html.Span("Maps updated using revised FHI and SVI weights.", style={"color": "green", "fontWeight": "700"}),
+    )
 
 
 if __name__ == "__main__":
