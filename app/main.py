@@ -6,7 +6,7 @@ import numpy as np
 import plotly.graph_objects as go
 from dash import ALL, Dash, Input, Output, State, ctx, dcc, html, no_update
 
-from popup_logic import suitability_hover_text
+from app.popup_logic import suitability_hover_text
 
 # ---------------------------------------------------------------------------
 # Methodology defaults from interactive notebook (percent values)
