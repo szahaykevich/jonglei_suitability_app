@@ -40,8 +40,12 @@ def heatmap_figure(z: np.ndarray, title: str, colorbar_title: str, with_hover: b
         trace = go.Heatmap(z=z, colorscale="YlOrRd", hoverinfo="skip", colorbar={"title": colorbar_title})
 
     fig = go.Figure(data=trace)
-    fig.update_layout(title=title, margin={"l": 10, "r": 10, "t": 40, "b": 10})
-    fig.update_yaxes(autorange="reversed")
+    fig.update_layout(
+        title=title,
+        margin={"l": 10, "r": 10, "t": 40, "b": 10},
+        xaxis={"constrain": "domain", "scaleanchor": "y", "scaleratio": 1},
+        yaxis={"constrain": "domain", "autorange": "reversed"},
+    )
     return fig
 
 
@@ -170,6 +174,7 @@ def _current_weight_map(
 
 
 initial_fhi, initial_svi, initial_si = compute_maps(FHI_DEFAULT_WEIGHTS, SVI_DEFAULT_WEIGHTS)
+MAP_ASPECT_RATIO = f"{initial_si.shape[1]} / {initial_si.shape[0]}"
 
 app = Dash(__name__)
 app.title = "Jonglei Suitability"
@@ -205,13 +210,46 @@ app.layout = html.Div(
         ),
         html.Button("Update Maps", id="update-btn", n_clicks=0, style={"marginTop": "1rem", "padding": "0.5rem 1rem", "fontWeight": "700"}),
         html.Div(id="status-msg", style={"marginTop": "0.5rem"}),
-        dcc.Graph(id="suitability-plot", figure=heatmap_figure(initial_si, "Suitability Index (Interactive)", "Suitability", with_hover=True, fhi=initial_fhi, svi=initial_svi)),
-        html.Div(
-            [
-                dcc.Graph(id="fhi-plot", figure=heatmap_figure(initial_fhi, "Flood Hazard Index (Static)", "FHI"), config={"staticPlot": True}),
-                dcc.Graph(id="svi-plot", figure=heatmap_figure(initial_svi, "Social Vulnerability Index (Static)", "SVI"), config={"staticPlot": True}),
-            ],
-            style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "1rem"},
+        dcc.Loading(
+            children=html.Div(
+                [
+                    html.Div(
+                        dcc.Graph(
+                            id="suitability-plot",
+                            figure=heatmap_figure(initial_si, "Suitability Index (Interactive)", "Suitability", with_hover=True, fhi=initial_fhi, svi=initial_svi),
+                            style={"height": "100%"},
+                        ),
+                        style={"aspectRatio": MAP_ASPECT_RATIO},
+                    ),
+                    html.Div(
+                        [
+                            html.Div(
+                                dcc.Graph(
+                                    id="fhi-plot",
+                                    figure=heatmap_figure(initial_fhi, "Flood Hazard Index (Static)", "FHI"),
+                                    config={"staticPlot": True},
+                                    style={"height": "100%"},
+                                ),
+                                style={"aspectRatio": MAP_ASPECT_RATIO},
+                            ),
+                            html.Div(
+                                dcc.Graph(
+                                    id="svi-plot",
+                                    figure=heatmap_figure(initial_svi, "Social Vulnerability Index (Static)", "SVI"),
+                                    config={"staticPlot": True},
+                                    style={"height": "100%"},
+                                ),
+                                style={"aspectRatio": MAP_ASPECT_RATIO},
+                            ),
+                        ],
+                        style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "1rem"},
+                    ),
+                ],
+                style={"display": "grid", "gap": "1rem"},
+            ),
+            type="default",
+            custom_spinner=html.Div("Loading updated maps...", style={"fontWeight": "700", "fontSize": "1.1rem"}),
+            overlay_style={"visibility": "visible", "backgroundColor": "rgba(255,255,255,0.82)"},
         ),
     ],
     style={"maxWidth": "1200px", "margin": "0 auto", "padding": "1rem"},
