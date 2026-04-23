@@ -2,51 +2,42 @@
 
 from __future__ import annotations
 
-import numpy as np
-import plotly.graph_objects as go
 from dash import Dash, Input, Output, dcc, html
 
-from popup_logic import suitability_hover_text
-from raster_utils import minmax_scale
-from weights import DEFAULT_FHI_WEIGHTS, DEFAULT_SVI_WEIGHTS, combined_index_weight
+try:
+    from .compute import compute_indices
+    from .config import FHI_DEFAULT_WEIGHTS, SVI_DEFAULT_WEIGHTS
+    from .data_loader import load_rasters
+    from .plotting import build_suitability_figure, extract_point_summary
+except ImportError:  # script execution fallback
+    from compute import compute_indices
+    from config import FHI_DEFAULT_WEIGHTS, SVI_DEFAULT_WEIGHTS
+    from data_loader import load_rasters
+    from plotting import build_suitability_figure, extract_point_summary
 
-# Demo grid (replace with raster data in production)
-np.random.seed(7)
-GRID_SHAPE = (25, 25)
-FHI_GRID = minmax_scale(np.random.rand(*GRID_SHAPE))
-SVI_GRID = minmax_scale(np.random.rand(*GRID_SHAPE))
-
-
-def suitability_grid(fhi_weight: float, svi_weight: float) -> np.ndarray:
-    fhi_w, svi_w = combined_index_weight(fhi_weight, svi_weight)
-    return (FHI_GRID * fhi_w) + (SVI_GRID * svi_w)
+RASTERS = load_rasters()
 
 
-def make_figure(fhi_weight: float, svi_weight: float) -> go.Figure:
-    surface = suitability_grid(fhi_weight, svi_weight)
-    hover = np.empty(surface.shape, dtype=object)
-    for row in range(surface.shape[0]):
-        for col in range(surface.shape[1]):
-            hover[row, col] = suitability_hover_text(
-                county_name=f"Cell {row},{col}",
-                suitability_value=surface[row, col],
-                fhi_score=FHI_GRID[row, col],
-                svi_score=SVI_GRID[row, col],
-            )
-
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=surface,
-            text=hover,
-            hoverinfo="text",
-            colorscale="Viridis",
-            colorbar={"title": "Suitability"},
-        )
+def weight_slider(slider_id: str, label: str, value: float) -> html.Div:
+    return html.Div(
+        [
+            html.Label(f"{label} ({value:.2f}%)", id=f"{slider_id}-label"),
+            dcc.Slider(
+                id=slider_id,
+                min=1,
+                max=60,
+                step=0.01,
+                value=value,
+                tooltip={"placement": "bottom", "always_visible": False},
+            ),
+        ],
+        style={"marginBottom": "0.65rem"},
     )
-    fig.update_layout(
-        title="Jonglei Suitability Map (Prototype)",
-        margin={"l": 10, "r": 10, "t": 40, "b": 10},
-    )
+
+
+def compute_figure(fhi_weights: dict[str, float], svi_weights: dict[str, float]):
+    fhi, svi, suitability = compute_indices(RASTERS.fhi_layers, RASTERS.svi_layers, fhi_weights, svi_weights)
+    fig = build_suitability_figure(suitability, fhi, svi)
     return fig
 
 
@@ -56,37 +47,91 @@ app.title = "Jonglei Suitability"
 app.layout = html.Div(
     [
         html.H2("UNMISS Jonglei Suitability Explorer"),
-        html.Label("FHI contribution"),
-        dcc.Slider(
-            id="fhi-weight",
-            min=0,
-            max=1,
-            step=0.05,
-            value=0.6,
-            marks={0: "0", 0.5: "0.5", 1: "1"},
-        ),
-        html.Label("SVI contribution"),
-        dcc.Slider(
-            id="svi-weight",
-            min=0,
-            max=1,
-            step=0.05,
-            value=0.4,
-            marks={0: "0", 0.5: "0.5", 1: "1"},
-        ),
-        dcc.Graph(id="suitability-plot", figure=make_figure(0.6, 0.4)),
         html.Div(
-            f"Default FHI weights: {DEFAULT_FHI_WEIGHTS.normalized()} | "
-            f"Default SVI weights: {DEFAULT_SVI_WEIGHTS.normalized()}"
+            [
+                html.Strong("Raster directory"),
+                html.Div(str(RASTERS.raster_dir)),
+                html.Div(
+                    RASTERS.warnings[0] if RASTERS.warnings else "All configured rasters loaded.",
+                    style={"color": "#b45309" if RASTERS.warnings else "#065f46", "marginTop": "0.25rem"},
+                    id="raster-status",
+                ),
+            ],
+            style={"padding": "0.75rem", "border": "1px solid #ddd", "marginBottom": "1rem"},
+        ),
+        html.Div(
+            [
+                html.Div(
+                    [
+                        html.H4("FHI weights"),
+                        *[
+                            weight_slider(f"fhi-{name}", name, value)
+                            for name, value in FHI_DEFAULT_WEIGHTS.items()
+                        ],
+                    ],
+                    style={"flex": "1", "minWidth": "320px"},
+                ),
+                html.Div(
+                    [
+                        html.H4("SVI weights"),
+                        *[
+                            weight_slider(f"svi-{name}", name, value)
+                            for name, value in SVI_DEFAULT_WEIGHTS.items()
+                        ],
+                    ],
+                    style={"flex": "1", "minWidth": "320px"},
+                ),
+            ],
+            style={"display": "flex", "gap": "1rem", "flexWrap": "wrap"},
+        ),
+        dcc.Graph(id="suitability-map", figure=compute_figure(FHI_DEFAULT_WEIGHTS, SVI_DEFAULT_WEIGHTS)),
+        html.Div(
+            [
+                html.H4("Hover details"),
+                html.Div(
+                    "Hover: hover or click a cell to view Suitability, FHI, and SVI.",
+                    id="hover-details",
+                    style={"fontFamily": "monospace"},
+                ),
+                html.H4("Click details", style={"marginTop": "0.75rem"}),
+                html.Div(
+                    "Click: hover or click a cell to view Suitability, FHI, and SVI.",
+                    id="click-details",
+                    style={"fontFamily": "monospace"},
+                ),
+            ],
+            style={"padding": "0.75rem", "border": "1px solid #ddd", "marginTop": "0.75rem"},
         ),
     ],
-    style={"maxWidth": "980px", "margin": "0 auto", "padding": "1rem"},
+    style={"maxWidth": "1200px", "margin": "0 auto", "padding": "1rem"},
 )
 
 
-@app.callback(Output("suitability-plot", "figure"), Input("fhi-weight", "value"), Input("svi-weight", "value"))
-def refresh_map(fhi_weight: float, svi_weight: float) -> go.Figure:
-    return make_figure(fhi_weight, svi_weight)
+@app.callback(
+    Output("suitability-map", "figure"),
+    Output("hover-details", "children"),
+    Output("click-details", "children"),
+    *([Input(f"fhi-{name}", "value") for name in FHI_DEFAULT_WEIGHTS]),
+    *([Input(f"svi-{name}", "value") for name in SVI_DEFAULT_WEIGHTS]),
+    Input("suitability-map", "hoverData"),
+    Input("suitability-map", "clickData"),
+)
+def refresh_map(*args):
+    fhi_count = len(FHI_DEFAULT_WEIGHTS)
+    svi_count = len(SVI_DEFAULT_WEIGHTS)
+
+    fhi_vals = args[:fhi_count]
+    svi_vals = args[fhi_count : fhi_count + svi_count]
+    hover_data = args[-2]
+    click_data = args[-1]
+
+    fhi_weights = {name: float(val) for name, val in zip(FHI_DEFAULT_WEIGHTS, fhi_vals)}
+    svi_weights = {name: float(val) for name, val in zip(SVI_DEFAULT_WEIGHTS, svi_vals)}
+
+    fig = compute_figure(fhi_weights, svi_weights)
+    hover_summary = extract_point_summary(hover_data, "Hover")
+    click_summary = extract_point_summary(click_data, "Click")
+    return fig, hover_summary, click_summary
 
 
 if __name__ == "__main__":
