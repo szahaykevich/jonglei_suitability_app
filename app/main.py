@@ -50,13 +50,13 @@ def heatmap_figure(z: np.ndarray, title: str, colorbar_title: str, with_hover: b
 
 
 def make_slider(family: str, name: str, value: float) -> html.Div:
-    """Create a synchronized slider + numeric input block with a visible percent label."""
+    """Create a synchronized slider + numeric input block for one factor."""
 
     slider_id = {"type": "weight-slider", "family": family, "name": name}
     input_id = {"type": "weight-input", "family": family, "name": name}
     return html.Div(
         [
-            html.Div([html.Span(name), html.Span(f"{value:.2f}%", id={"type": "weight-label", "family": family, "name": name}, style={"fontWeight": "600"})], style={"display": "flex", "justifyContent": "space-between"}),
+            html.Div(html.Span(name, style={"fontWeight": "600"})),
             html.Div(
                 [
                     html.Div(
@@ -279,23 +279,18 @@ def sync_svi_weights(svi_slider_vals: list[float], svi_input_vals: list[float]):
 
 
 @app.callback(
-    Output({"type": "weight-label", "family": "fhi", "name": ALL}, "children"),
-    Output({"type": "weight-label", "family": "svi", "name": ALL}, "children"),
     Output("fhi-total", "children"),
     Output("svi-total", "children"),
     Input({"type": "weight-slider", "family": "fhi", "name": ALL}, "value"),
     Input({"type": "weight-slider", "family": "svi", "name": ALL}, "value"),
 )
-def refresh_weight_labels(fhi_vals: list[float], svi_vals: list[float]):
-    fhi_labels = [f"{v:.2f}%" for v in fhi_vals]
-    svi_labels = [f"{v:.2f}%" for v in svi_vals]
-
+def refresh_weight_totals(fhi_vals: list[float], svi_vals: list[float]):
     fhi_total = pct_total(fhi_vals)
     svi_total = pct_total(svi_vals)
 
     fhi_text = f"FHI total: {fhi_total:.2f}% {'✅' if total_ok(fhi_total) else '❌'}"
     svi_text = f"SVI total: {svi_total:.2f}% {'✅' if total_ok(svi_total) else '❌'}"
-    return fhi_labels, svi_labels, fhi_text, svi_text
+    return fhi_text, svi_text
 
 
 @app.callback(
