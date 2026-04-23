@@ -7,8 +7,9 @@ from pathlib import Path
 
 import numpy as np
 import rasterio
+from rasterio.transform import from_bounds
 
-from app.config import DISPLAY_SCALE, PLACEHOLDER_SHAPE, factor_paths, get_raster_dir
+from app.config import CITIES_VECTOR_PATH, DISPLAY_SCALE, PLACEHOLDER_SHAPE, ROADS_VECTOR_PATH, factor_paths, get_raster_dir
 from app.raster_utils import is_lfs_pointer, placeholder_layer, read_reclass_layer
 
 
@@ -17,6 +18,10 @@ class RasterBundle:
     fhi_layers: dict[str, np.ndarray]
     svi_layers: dict[str, np.ndarray]
     raster_dir: Path
+    display_transform: object | None
+    display_crs: object | None
+    roads_path: Path
+    cities_path: Path
     warnings: list[str]
 
 
@@ -46,9 +51,27 @@ def load_rasters(raster_dir: Path | None = None) -> RasterBundle:
 
     try:
         out_shape, bounds = _reference_grid(dem)
+        with rasterio.open(dem) as ref:
+            display_crs = ref.crs
         fhi = {name: read_reclass_layer(path, out_shape=out_shape, bounds=bounds) for name, path in fhi_paths.items()}
         svi = {name: read_reclass_layer(path, out_shape=out_shape, bounds=bounds) for name, path in svi_paths.items()}
-        return RasterBundle(fhi_layers=fhi, svi_layers=svi, raster_dir=root, warnings=warnings)
+        display_transform = from_bounds(bounds.left, bounds.bottom, bounds.right, bounds.top, out_shape[1], out_shape[0])
+        roads_path = root / ROADS_VECTOR_PATH.name
+        cities_path = root / CITIES_VECTOR_PATH.name
+        if not roads_path.exists():
+            warnings.append(f"Roads overlay file not found: {roads_path}. Suitability map will run without roads overlay.")
+        if not cities_path.exists():
+            warnings.append(f"Cities overlay file not found: {cities_path}. Suitability map will run without cities overlay.")
+        return RasterBundle(
+            fhi_layers=fhi,
+            svi_layers=svi,
+            raster_dir=root,
+            display_transform=display_transform,
+            display_crs=display_crs,
+            roads_path=roads_path,
+            cities_path=cities_path,
+            warnings=warnings,
+        )
     except Exception as exc:  # graceful runtime behavior for local environments
         warnings.append(
             f"Raster load failed ({exc.__class__.__name__}: {exc}). "
@@ -61,4 +84,13 @@ def _placeholder_bundle(root: Path, warnings: list[str]) -> RasterBundle:
     fhi_paths, svi_paths = factor_paths(root)
     fhi = {name: placeholder_layer(PLACEHOLDER_SHAPE) for name in fhi_paths}
     svi = {name: placeholder_layer(PLACEHOLDER_SHAPE) for name in svi_paths}
-    return RasterBundle(fhi_layers=fhi, svi_layers=svi, raster_dir=root, warnings=warnings)
+    return RasterBundle(
+        fhi_layers=fhi,
+        svi_layers=svi,
+        raster_dir=root,
+        display_transform=None,
+        display_crs=None,
+        roads_path=root / ROADS_VECTOR_PATH.name,
+        cities_path=root / CITIES_VECTOR_PATH.name,
+        warnings=warnings,
+    )

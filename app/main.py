@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import geopandas as gpd
 import numpy as np
 import plotly.graph_objects as go
 from dash import ALL, Dash, Input, Output, State, callback_context, dcc, html, no_update
+from rasterio.transform import rowcol, xy
+from rasterio.warp import transform
 
 from app.compute import compute_indices
 from app.config import FHI_DEFAULT_WEIGHTS, SVI_DEFAULT_WEIGHTS
 from app.data_loader import load_rasters
-from app.popup_logic import suitability_hover_text
 
 RASTER_BUNDLE = load_rasters()
 FHI_LAYERS = RASTER_BUNDLE.fhi_layers
@@ -22,31 +26,155 @@ def compute_maps(fhi_weights_pct: dict[str, float], svi_weights_pct: dict[str, f
     return compute_indices(FHI_LAYERS, SVI_LAYERS, fhi_weights_pct, svi_weights_pct)
 
 
-def heatmap_figure(z: np.ndarray, title: str, colorbar_title: str, with_hover: bool = False, fhi: np.ndarray | None = None, svi: np.ndarray | None = None) -> go.Figure:
+def _lat_lon_grids(shape: tuple[int, int]) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Build latitude/longitude display grids from raster transform/CRS."""
+
+    if RASTER_BUNDLE.display_transform is None or RASTER_BUNDLE.display_crs is None:
+        return None, None
+
+    rows, cols = np.indices(shape)
+    xs, ys = xy(RASTER_BUNDLE.display_transform, rows, cols, offset="center")
+    x_flat = np.asarray(xs, dtype=np.float64).ravel()
+    y_flat = np.asarray(ys, dtype=np.float64).ravel()
+
+    try:
+        lon_flat, lat_flat = transform(RASTER_BUNDLE.display_crs, "EPSG:4326", x_flat.tolist(), y_flat.tolist())
+    except Exception:
+        return None, None
+
+    lat = np.asarray(lat_flat, dtype=np.float64).reshape(shape)
+    lon = np.asarray(lon_flat, dtype=np.float64).reshape(shape)
+    return lat, lon
+
+
+def _vector_overlay_traces(path: Path, label: str, mode: str, color: str) -> tuple[list[go.Scatter], str | None]:
+    """Read vector file and convert to row/col aligned plot traces."""
+
+    if RASTER_BUNDLE.display_transform is None or RASTER_BUNDLE.display_crs is None:
+        return [], f"{label} overlay unavailable because raster transform/CRS metadata is not available."
+    if not path.exists():
+        return [], f"{label} overlay file not found at {path}."
+
+    try:
+        gdf = gpd.read_file(path)
+    except Exception as exc:
+        return [], f"{label} overlay could not be loaded ({exc.__class__.__name__}: {exc})."
+
+    if gdf.empty:
+        return [], f"{label} overlay file is empty: {path}."
+    if gdf.crs is None:
+        return [], f"{label} overlay has no CRS metadata: {path}."
+
+    gdf = gdf.to_crs(RASTER_BUNDLE.display_crs)
+    traces: list[go.Scatter] = []
+    for geometry in gdf.geometry:
+        if geometry is None or geometry.is_empty:
+            continue
+
+        segments: list[tuple[np.ndarray, np.ndarray]] = []
+        if geometry.geom_type == "LineString":
+            xs, ys = geometry.xy
+            segments = [(np.asarray(xs), np.asarray(ys))]
+        elif geometry.geom_type == "MultiLineString":
+            for line in geometry.geoms:
+                xs, ys = line.xy
+                segments.append((np.asarray(xs), np.asarray(ys)))
+        elif geometry.geom_type == "Point":
+            segments = [(np.asarray([geometry.x]), np.asarray([geometry.y]))]
+        elif geometry.geom_type == "MultiPoint":
+            for point in geometry.geoms:
+                segments.append((np.asarray([point.x]), np.asarray([point.y])))
+        else:
+            continue
+
+        for xs, ys in segments:
+            rows, cols = rowcol(RASTER_BUNDLE.display_transform, xs, ys)
+            x_plot = np.asarray(cols, dtype=np.float64)
+            y_plot = np.asarray(rows, dtype=np.float64)
+            if mode == "lines":
+                traces.append(
+                    go.Scatter(x=x_plot, y=y_plot, mode="lines", line={"color": color, "width": 1}, hoverinfo="skip", showlegend=False)
+                )
+            else:
+                traces.append(
+                    go.Scatter(
+                        x=x_plot,
+                        y=y_plot,
+                        mode="markers",
+                        marker={"color": color, "size": 6, "symbol": "circle"},
+                        name=label,
+                        hovertemplate=f"{label}<extra></extra>",
+                        showlegend=False,
+                    )
+                )
+
+    if not traces:
+        return [], f"{label} overlay has no supported geometries in {path}."
+    return traces, None
+
+
+def heatmap_figure(
+    z: np.ndarray,
+    title: str,
+    colorbar_title: str,
+    with_hover: bool = False,
+    fhi: np.ndarray | None = None,
+    svi: np.ndarray | None = None,
+    show_roads: bool = False,
+    show_cities: bool = False,
+) -> tuple[go.Figure, list[str]]:
     """Build a heatmap figure."""
 
+    overlay_warnings: list[str] = []
     if with_hover and fhi is not None and svi is not None:
-        hover = np.empty(z.shape, dtype=object)
-        for row in range(z.shape[0]):
-            for col in range(z.shape[1]):
-                hover[row, col] = suitability_hover_text(
-                    county_name=f"Cell {row},{col}",
-                    suitability_value=float(z[row, col]),
-                    fhi_score=float(fhi[row, col]),
-                    svi_score=float(svi[row, col]),
-                )
-        trace = go.Heatmap(z=z, text=hover, hoverinfo="text", colorscale="Viridis", colorbar={"title": colorbar_title})
+        lat_grid, lon_grid = _lat_lon_grids(z.shape)
+        if lat_grid is None or lon_grid is None:
+            custom = np.dstack([fhi, svi, np.full_like(z, np.nan, dtype=np.float64), np.full_like(z, np.nan, dtype=np.float64)])
+            hovertemplate = (
+                "Suitability: %{z:.3f}<br>"
+                "FHI: %{customdata[0]:.3f}<br>"
+                "SVI: %{customdata[1]:.3f}<br>"
+                "Latitude: unavailable<br>"
+                "Longitude: unavailable<extra></extra>"
+            )
+        else:
+            custom = np.dstack([fhi, svi, lat_grid, lon_grid])
+            hovertemplate = (
+                "Suitability: %{z:.3f}<br>"
+                "FHI: %{customdata[0]:.3f}<br>"
+                "SVI: %{customdata[1]:.3f}<br>"
+                "Latitude: %{customdata[2]:.5f}<br>"
+                "Longitude: %{customdata[3]:.5f}<extra></extra>"
+            )
+        trace = go.Heatmap(
+            z=z,
+            customdata=custom,
+            hovertemplate=hovertemplate,
+            colorscale="Viridis",
+            colorbar={"title": colorbar_title},
+        )
     else:
         trace = go.Heatmap(z=z, colorscale="YlOrRd", hoverinfo="skip", colorbar={"title": colorbar_title})
 
     fig = go.Figure(data=trace)
+    if with_hover and show_roads:
+        roads_traces, roads_warning = _vector_overlay_traces(RASTER_BUNDLE.roads_path, "Roads", mode="lines", color="#334155")
+        fig.add_traces(roads_traces)
+        if roads_warning:
+            overlay_warnings.append(roads_warning)
+    if with_hover and show_cities:
+        cities_traces, cities_warning = _vector_overlay_traces(RASTER_BUNDLE.cities_path, "Cities", mode="markers", color="#b91c1c")
+        fig.add_traces(cities_traces)
+        if cities_warning:
+            overlay_warnings.append(cities_warning)
+
     fig.update_layout(
         title=title,
         margin={"l": 10, "r": 10, "t": 40, "b": 10},
         xaxis={"constrain": "domain", "scaleanchor": "y", "scaleratio": 1},
         yaxis={"constrain": "domain", "autorange": "reversed"},
     )
-    return fig
+    return fig, overlay_warnings
 
 
 def make_slider(family: str, name: str, value: float) -> html.Div:
@@ -174,6 +302,16 @@ def _current_weight_map(
 
 
 initial_fhi, initial_svi, initial_si = compute_maps(FHI_DEFAULT_WEIGHTS, SVI_DEFAULT_WEIGHTS)
+initial_suitability_fig, initial_overlay_warnings = heatmap_figure(
+    initial_si,
+    "Suitability Index (Interactive)",
+    "Suitability",
+    with_hover=True,
+    fhi=initial_fhi,
+    svi=initial_svi,
+)
+initial_fhi_fig, _ = heatmap_figure(initial_fhi, "Flood Hazard Index (Static)", "FHI")
+initial_svi_fig, _ = heatmap_figure(initial_svi, "Social Vulnerability Index (Static)", "SVI")
 MAP_ASPECT_RATIO = f"{initial_si.shape[1]} / {initial_si.shape[0]}"
 
 app = Dash(__name__)
@@ -186,7 +324,23 @@ app.layout = html.Div(
         html.H2("UNMISS Jonglei Suitability Explorer"),
         html.P("Adjust FHI and SVI factor weights. Maps update only when each group totals exactly 100% and you press Update Maps."),
         html.P(f"Raster source: {RASTER_BUNDLE.raster_dir}"),
+        html.Div(
+            [
+                html.Span("Suitability overlays: ", style={"fontWeight": "700"}),
+                dcc.Checklist(
+                    id="overlay-toggles",
+                    options=[
+                        {"label": "Roads", "value": "roads"},
+                        {"label": "Cities", "value": "cities"},
+                    ],
+                    value=[],
+                    inline=True,
+                ),
+            ],
+            style={"marginBottom": "0.75rem"},
+        ),
         html.Ul(warnings_text, style={"color": "#b45309"}) if warnings_text else html.Div(),
+        html.Ul([html.Li(message) for message in initial_overlay_warnings], style={"color": "#b45309"}) if initial_overlay_warnings else html.Div(),
         html.Div(
             [
                 html.Div(
@@ -216,7 +370,7 @@ app.layout = html.Div(
                     html.Div(
                         dcc.Graph(
                             id="suitability-plot",
-                            figure=heatmap_figure(initial_si, "Suitability Index (Interactive)", "Suitability", with_hover=True, fhi=initial_fhi, svi=initial_svi),
+                            figure=initial_suitability_fig,
                             style={"height": "100%"},
                         ),
                         style={"aspectRatio": MAP_ASPECT_RATIO},
@@ -226,7 +380,7 @@ app.layout = html.Div(
                             html.Div(
                                 dcc.Graph(
                                     id="fhi-plot",
-                                    figure=heatmap_figure(initial_fhi, "Flood Hazard Index (Static)", "FHI"),
+                                    figure=initial_fhi_fig,
                                     config={"staticPlot": True},
                                     style={"height": "100%"},
                                 ),
@@ -235,7 +389,7 @@ app.layout = html.Div(
                             html.Div(
                                 dcc.Graph(
                                     id="svi-plot",
-                                    figure=heatmap_figure(initial_svi, "Social Vulnerability Index (Static)", "SVI"),
+                                    figure=initial_svi_fig,
                                     config={"staticPlot": True},
                                     style={"height": "100%"},
                                 ),
@@ -307,6 +461,7 @@ def refresh_weight_totals(fhi_vals: list[float], svi_vals: list[float]):
     State({"type": "weight-slider", "family": "svi", "name": ALL}, "value"),
     State({"type": "weight-input", "family": "svi", "name": ALL}, "id"),
     State({"type": "weight-input", "family": "svi", "name": ALL}, "value"),
+    State("overlay-toggles", "value"),
     prevent_initial_call=True,
 )
 def update_maps(
@@ -319,6 +474,7 @@ def update_maps(
     svi_slider_vals: list[float],
     svi_input_ids: list[dict[str, str]],
     svi_input_vals: list[float],
+    overlay_toggles: list[str] | None,
 ):
     del n_clicks
     fhi_weights = _current_weight_map(
@@ -346,12 +502,30 @@ def update_maps(
         )
 
     fhi, svi, si = compute_maps(fhi_weights, svi_weights)
+    show_roads = bool(overlay_toggles and "roads" in overlay_toggles)
+    show_cities = bool(overlay_toggles and "cities" in overlay_toggles)
+    suitability_fig, overlay_warnings = heatmap_figure(
+        si,
+        "Suitability Index (Interactive)",
+        "Suitability",
+        with_hover=True,
+        fhi=fhi,
+        svi=svi,
+        show_roads=show_roads,
+        show_cities=show_cities,
+    )
+    fhi_fig, _ = heatmap_figure(fhi, "Flood Hazard Index (Static)", "FHI")
+    svi_fig, _ = heatmap_figure(svi, "Social Vulnerability Index (Static)", "SVI")
+
+    status_children: list = [html.Span("Maps updated using revised FHI and SVI weights.", style={"color": "green", "fontWeight": "700"})]
+    if overlay_warnings:
+        status_children.append(html.Ul([html.Li(message) for message in overlay_warnings], style={"color": "#b45309", "marginTop": "0.5rem"}))
 
     return (
-        heatmap_figure(si, "Suitability Index (Interactive)", "Suitability", with_hover=True, fhi=fhi, svi=svi),
-        heatmap_figure(fhi, "Flood Hazard Index (Static)", "FHI"),
-        heatmap_figure(svi, "Social Vulnerability Index (Static)", "SVI"),
-        html.Span("Maps updated using revised FHI and SVI weights.", style={"color": "green", "fontWeight": "700"}),
+        suitability_fig,
+        fhi_fig,
+        svi_fig,
+        status_children,
     )
 
 
