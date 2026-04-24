@@ -11,6 +11,12 @@ DEFAULT_RASTER_DIR = PROJECT_ROOT / "data" / "processed"
 RASTER_DIR_ENV_VAR = "JONGLEI_RASTER_DIR"
 DISPLAY_SCALE = 0.10
 PLACEHOLDER_SHAPE = (80, 80)
+ROADS_VECTOR_CANDIDATES = [
+    PROJECT_ROOT / "public" / "data" / "jonglei_roads.geojson",
+    PROJECT_ROOT / "public" / "data" / "roads.geojson",
+    PROJECT_ROOT / "data" / "processed" / "jonglei_roads.geojson",
+    PROJECT_ROOT / "data" / "processed" / "roads.geojson",
+]
 
 FHI_FACTOR_FILES = {
     "Elevation": "Reclass_DEM1_2.tif",
