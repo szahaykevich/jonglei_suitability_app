@@ -9,7 +9,7 @@ import numpy as np
 import rasterio
 from rasterio.transform import from_bounds
 
-from app.config import DISPLAY_SCALE, PLACEHOLDER_SHAPE, ROADS_VECTOR_CANDIDATES, factor_paths, get_raster_dir
+from app.config import DISPLAY_SCALE, PLACEHOLDER_SHAPE, factor_paths, get_raster_dir
 from app.raster_utils import is_lfs_pointer, placeholder_layer, read_reclass_layer
 
 
@@ -20,7 +20,6 @@ class RasterBundle:
     raster_dir: Path
     display_transform: object | None
     display_crs: object | None
-    roads_path: Path
     warnings: list[str]
 
 
@@ -41,16 +40,12 @@ def load_rasters(raster_dir: Path | None = None) -> RasterBundle:
     warnings: list[str] = []
 
     dem = fhi_paths["Elevation"]
-    roads_path, roads_note = resolve_roads_path(root)
-    if roads_note:
-        warnings.append(roads_note)
-
     if not dem.exists() or is_lfs_pointer(dem):
         warnings.append(
             "Could not open full TIFF rasters (missing files or Git LFS pointers found). "
             "Showing placeholder grids. Set JONGLEI_RASTER_DIR to local full TIFFs for live data."
         )
-        return _placeholder_bundle(root, roads_path, warnings)
+        return _placeholder_bundle(root, warnings)
 
     try:
         out_shape, bounds = _reference_grid(dem)
@@ -65,7 +60,6 @@ def load_rasters(raster_dir: Path | None = None) -> RasterBundle:
             raster_dir=root,
             display_transform=display_transform,
             display_crs=display_crs,
-            roads_path=roads_path,
             warnings=warnings,
         )
     except Exception as exc:  # graceful runtime behavior for local environments
@@ -73,10 +67,10 @@ def load_rasters(raster_dir: Path | None = None) -> RasterBundle:
             f"Raster load failed ({exc.__class__.__name__}: {exc}). "
             "Showing placeholder grids."
         )
-        return _placeholder_bundle(root, roads_path, warnings)
+        return _placeholder_bundle(root, warnings)
 
 
-def _placeholder_bundle(root: Path, roads_path: Path, warnings: list[str]) -> RasterBundle:
+def _placeholder_bundle(root: Path, warnings: list[str]) -> RasterBundle:
     fhi_paths, svi_paths = factor_paths(root)
     fhi = {name: placeholder_layer(PLACEHOLDER_SHAPE) for name in fhi_paths}
     svi = {name: placeholder_layer(PLACEHOLDER_SHAPE) for name in svi_paths}
@@ -86,32 +80,5 @@ def _placeholder_bundle(root: Path, roads_path: Path, warnings: list[str]) -> Ra
         raster_dir=root,
         display_transform=None,
         display_crs=None,
-        roads_path=roads_path,
         warnings=warnings,
-    )
-
-
-def resolve_roads_path(root: Path) -> tuple[Path, str | None]:
-    """Find the best roads overlay file path inside the repository."""
-
-    root_candidates = [root / "jonglei_roads.shp", root / "jonglei_roads.geojson", root / "roads.geojson"]
-    for candidate in [*ROADS_VECTOR_CANDIDATES, *root_candidates]:
-        if candidate.exists():
-            return candidate, None
-
-    repo_root = Path(__file__).resolve().parents[1]
-    roads_vectors = sorted(
-        path
-        for path in repo_root.rglob("*")
-        if path.is_file() and path.suffix.lower() in {".geojson", ".json", ".shp", ".gpkg", ".zip"} and "road" in path.name.lower()
-    )
-    if roads_vectors:
-        return roads_vectors[0], f"Roads overlay path auto-detected at {roads_vectors[0]}."
-
-    fallback = ROADS_VECTOR_CANDIDATES[0]
-    return (
-        fallback,
-        "Roads overlay file not found. "
-        f"Expected one of: {', '.join(str(path) for path in ROADS_VECTOR_CANDIDATES)}. "
-        "If using a shapefile, keep .shp/.shx/.dbf/.prj together in the same folder.",
     )
