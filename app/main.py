@@ -65,7 +65,11 @@ def _vector_overlay_traces(path: Path, label: str, mode: str, color: str) -> tup
     if gdf.crs is None:
         return [], f"{label} overlay has no CRS metadata: {path}."
 
-    gdf = gdf.to_crs(RASTER_BUNDLE.display_crs)
+    try:
+        gdf = gdf.to_crs(RASTER_BUNDLE.display_crs)
+    except Exception:
+        return [], f"{label} overlay could not be reprojected to the raster CRS, so it was not displayed."
+
     traces: list[go.Scatter] = []
     for geometry in gdf.geometry:
         if geometry is None or geometry.is_empty:
