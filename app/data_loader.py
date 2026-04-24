@@ -94,7 +94,7 @@ def _placeholder_bundle(root: Path, roads_path: Path, warnings: list[str]) -> Ra
 def resolve_roads_path(root: Path) -> tuple[Path, str | None]:
     """Find the best roads overlay file path inside the repository."""
 
-    root_candidates = [root / "roads.geojson", root / "jonglei_roads.geojson"]
+    root_candidates = [root / "jonglei_roads.shp", root / "jonglei_roads.geojson", root / "roads.geojson"]
     for candidate in [*ROADS_VECTOR_CANDIDATES, *root_candidates]:
         if candidate.exists():
             return candidate, None
@@ -111,5 +111,7 @@ def resolve_roads_path(root: Path) -> tuple[Path, str | None]:
     fallback = ROADS_VECTOR_CANDIDATES[0]
     return (
         fallback,
-        f"Roads overlay file not found. Expected one of: {', '.join(str(path) for path in ROADS_VECTOR_CANDIDATES)}.",
+        "Roads overlay file not found. "
+        f"Expected one of: {', '.join(str(path) for path in ROADS_VECTOR_CANDIDATES)}. "
+        "If using a shapefile, keep .shp/.shx/.dbf/.prj together in the same folder.",
     )
